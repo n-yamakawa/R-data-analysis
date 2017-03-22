@@ -1,0 +1,245 @@
+---
+title: "Rで学ぶ実証分析"
+author: "N.Yamakawa"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+---
+
+# 6.1.擬似相関_1
+
+ゲーム時間とテスト成績の散布図
+
+```{r setup1, include=FALSE}
+library(dplyr)
+library(magrittr)
+library(knitr)
+
+opts_template$set(
+  fig_small = list(out.width = 200, out.height = 200), # 小さいグラフ
+  fig_large = list(out.width = 300, out.height = 300)  # 大きいグラフ
+  )
+#glimpse(data)
+```
+
+```{r pict6.1}
+data <- read.csv("data/Ch6.data.csv")
+plot(data[,c(2,1)], xlab="ゲーム時間", ylab="テスト成績")
+lm(grade~hours, data) %>% abline(col=4)
+```
+
+相関係数は`r cor(data[,1], data[,2]) %>% round(2)`です
+
+
+# 6.1.擬似相関_2
+
+図6.2.を再現するには「家庭環境」データが必要なため、データ生成からやり直す
+
+```{r setup2, include=FALSE}
+library(dplyr)
+library(magrittr)
+set.seed(1234) #再現性を持たせるため
+n     <- 400 # サンプルサイズ
+err   <- runif(n,30,60) # 誤差項（家庭環境）
+hours <- rnorm(n, err/10, 1) - 4
+hours <- round(ifelse(hours < 0, 0, hours), 1) # ゲーム時間
+Y     <- 20 + rnorm(n, 100, 10) - 1.2*err
+grade <- round(ifelse(Y > 100, 100, Y)) # 成績
+cbind(grade, hours, err) %>% as.data.frame() -> data0
+head(data0)
+```
+
+```{r pict6.1_beta}
+plot(data[,c(2,1)], xlab="ゲーム時間", ylab="テスト成績")
+lm(grade~hours, data = data0) %>% abline(col=4)
+
+```
+
+相関係数は`r cor(data0[,1], data0[,2]) %>% round(2)`。
+テキストとちょっと違うが、許容範囲かと。
+
+# 6.1.擬似相関_3
+
+3変数間の散布図。
+
+```{r sanpuzu}
+library(psych) #散布図用
+data0 %>% pairs.panels(rug=F,ellipses=F,lm=T)
+```
+
+
+# 6.1.P119_図6.2的な無向グラフ
+
+```{r pict6.2_beta, opts.label="fig_large"}
+library(qgraph) #無向グラフ用
+data0 %>% cor() %>% qgraph(edge.labels=T)
+```
+
+```{r pict6.2 ,echo=FALSE}
+library(DiagrammeR)
+grViz('
+digraph {
+  rankdir=LR
+  node [shape = box,
+        style = rounded,
+        fontname = Helvetica]
+
+  家庭環境 -> 学業成績
+  家庭環境 -> ゲーム時間
+  ゲーム時間 -> 学業成績
+}
+')
+```
+
+# 6.1.3.同時性
+
+```{r pict6.3}
+pc <- read.csv("data/police_crime.csv", stringsAsFactors=FALSE)
+plot(pc[,2],pc[,3],type="n", xlim = c(1.5, 3.5),
+ xlab="警察官数", ylab="刑法犯認知件数")
+text(pc[,2],pc[,3], pc[,1])
+lm(crime~police, pc) %>% abline(col=4)
+```
+
+相関係数は`r cor(pc[,2], pc[,3]) %>% round(3)`。
+
+
+# 6.2.2.平均トリートメント効果_1
+
+```{r dataspread}
+set.seed(1234); n <- 400; T <- rbinom(n, 1, 0.6)
+TE <- 2; Y <- TE*T + rnorm(n); id <- 1:400
+data1 <- data.frame(id, T, Y)
+data1 %>% tidyr::spread(T, Y) %>% head() %>% kable()
+```
+
+NAの部分の値がわかればトリートメント効果が計算できるが実際はわからない。
+
+# 6.2.2.平均トリートメント効果_2
+
+```{r boxplot}
+boxplot(Y ~ T, data=data1)
+EY1 <- mean(Y[T==1]); EY0 <- mean(Y[T==0])
+```
+
+平均トリートメント効果(ATE)は`r round(EY1 - EY0, 3)`で実際の値(2)に近い。
+
+# 6.2.2.平均トリートメント効果_3
+
+```{r}
+set.seed(12345); n <- 400; Z <- runif(n)
+T <- rbinom(n, 1, Z); TE <- 2; Y <- TE*T + (2*Z - 1) + rnorm(n)
+data2 <- data.frame(T, Y, Z)
+boxplot(Y ~ T, data=data2)
+EY1 <- mean(Y[T==1]); EY0 <- mean(Y[T==0])
+```
+
+平均トリートメント効果(ATE)は`r round(EY1 - EY0, 3)`で実際の値(2)から外れている。
+
+#  7.1_外生変数
+
+```{r}
+data("ToothGrowth")
+summary(ToothGrowth)
+```
+
+OJとVCそれぞれ30レコードずつ。
+それぞれ、doseとlenの関係は？
+
+```{r}
+ToothGrowth %>% lm(len~dose, data = .) -> lm.TG
+ToothGrowth %>% filter(supp == "VC") %>% lm(len~dose, data = .) -> lm.VC
+ToothGrowth %>% filter(supp == "OJ") %>% lm(len~dose, data = .) -> lm.OJ
+summary(lm.TG)$coef
+summary(lm.VC)$coef
+summary(lm.OJ)$coef
+plot(ToothGrowth[,c(3, 1)], col = ToothGrowth$supp)
+abline(lm.TG, col=4)
+abline(lm.VC, col=2)
+abline(lm.OJ)
+
+```
+
+VCはOJと比べて、doseが少ないときのlenの値が小さい。
+doseが2を超えると、VCとOJの差は殆ど無い。
+
+```{r}
+as.double(lm.TG$coef[1] + lm.TG$coef[2] *2.114)
+as.double(lm.VC$coef[1] + lm.VC$coef[2] *2.114)
+as.double(lm.OJ$coef[1] + lm.OJ$coef[2] *2.114)
+```
+
+#7.2_内生変数
+
+```{r}
+set.seed(1234)
+n <- 200; e <- rnorm(n)
+X <- (1+0.5*e)*runif(n)
+b0 <- 1; b1 <- 2
+Y <- b0 + X*b1 + e
+lm(Y~X)$coef
+```
+
+Xの係数`r lm(Y~X)$coef[2]`はb1の推定としては不適切？
+
+```{r}
+cov(X,e)/var(X) + b1
+```
+
+数式(7.7)による補正rをすると、上記Xの係数とほぼ一致
+
+#7.3.2_双子データ
+
+OpenMxパッケージの双子データを用いる
+
+```{r warning=FALSE, message=FALSE}
+library(OpenMx)
+data(twinData);head(twinData)
+```
+
+
+fam：家族番号  
+age：双子の年齢  
+zyg：遺伝子とコホートをコード化(1-10)  
+part：？(0:15, 1:224, 2:3569)  
+wt1,2：双子の体重(kg)  
+ht1,2：双子の身長(m)  
+htwt1,2：双子のBMI(kg/m^2)  
+bmi1,2：双子のBMIの対数  
+cohort：youngerかolder  
+zygosity：遺伝子パターン(MZFF, MZMM, DZFF, DZMM, DZOS)  
+
+```{r}
+boxplot(age~cohort, twinData)
+```
+
+cohortの境界は30歳
+
+双子の組に対して、身長の差と体重の差で線形モデルを作る
+
+```{r}
+twinData %>%
+  mutate(wt0 = wt1 - wt2, ht0 = ht1 - ht2) -> data1
+lm(wt0 ~ ht0-1, data=data1) -> lm.data1
+summary(lm.data1)$coef
+plot(data1$ht0, data1$wt0, xlab="身長", ylab="体重")
+abline(lm.data1, col=4)
+
+```
+
+身長1cm毎に体重は0.87kg増える
+
+
+```{r}
+c("age", "zyg", "part", "wt0", "ht0", "cohort", "zygosity") -> coln
+rbind(
+  twinData[,c(2:4,5,7,13:14)] %>% set_colnames(coln),
+  twinData[,c(2:4,6,8,13:14)] %>% set_colnames(coln)
+)-> data2
+lm(wt0 ~ ., data=data2) -> lm.data2
+summary(lm.data2)$coef
+
+```
+
+身長1cm毎に体重は0.72kg増える。
