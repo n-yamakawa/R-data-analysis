@@ -1,0 +1,226 @@
+---
+title: "Rで学ぶ実証分析9章"
+author: "N.Yamakawa"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+---
+
+# 1.データ概要
+
+パッケージを読み込みます。
+
+```{r setup1, message=FALSE, warning=FALSE}
+library(Matching) #本章で主に使うパッケージ
+library(dplyr)
+library(magrittr)
+library(psych) #散布図用
+library(e1071) #SVMでIPWを導出する用
+```
+
+データを読み込みます。
+データのIDがないので、rownamesをID列とします。
+
+```{r data}
+data <- read.csv("data/wage_training.csv")
+data$ID <- rownames(data) %>% as.integer()
+glimpse(data)
+summary(data)
+data[,-5] %>% pairs.panels(rug=F,ellipses=F,lm=T)
+```
+
+wageaとwagebの相関が強すぎて、大丈夫か不安になりますが、、、
+
+```{r avediff1}
+data %>% group_by(T) %>% summarise(ave_a = mean(wagea), ave_b = mean(wageb)) -> t_wage
+t_wage
+
+```
+
+研修に参加した(T=1)の方が給与(wagea)が`r round(t_wage$ave_a[2] - t_wage$ave_a[1], 3)`万円低いと言う結果に見えます。
+が、wagebを見ると、そもそも給与が低かった人のほうが研修に参加しているので
+
+単純にwagea-wagebを集計したらどうなるか、という発想になります。
+
+```{r avediff2}
+avediff <- data %>%
+  mutate(wagediff = wagea - wageb) %>%
+  summarise(ave_diff = mean(wagediff))
+
+```
+
+で、研修の効果は`r avediff`万円に見えます。
+
+が実は、次章以降の分析を踏まえるとこの値は過小評価であることがわかります。
+
+#2.手動マッチング
+
+データの最初の行のデータは以下の通りです。
+
+```{r handwork1}
+data[1,]
+```
+
+yearsとwagebが一緒なデータはマッチングできると考え、
+T=0に同じパラメータを持つ行が無いか探してみましょう。
+
+```{r handwork2}
+match1 <- data %>% filter(years==4 & wageb==18 & T ==0)
+match1
+```
+
+wageaの値を抽出。
+
+```{r handwork3}
+match1$wagea
+```
+
+ID:1のwageaは`r data[1,1]`、それに対応するT=0のデータのwageaの平均は`r mean(match1$wagea)`なので、ATET(Treatによる効果)は`r data[1,1] - mean(match1$wagea)`万円。
+
+このような処理をT=1の各行について行えば研修効果が出そうですが、二つ問題があります。
+
+- 面倒くさい
+- 共変量がぴったり一致しないケースはどうするか？
+
+二つ目の問題に対して、アプローチが2つあり、次の二章で取り扱います。
+
+- 一致しないケースは分析対象から外す -> 厳密なマッチング
+
+- 一致しないケースは、近しい値を探す -> 厳密ではないマッチング
+
+#3.厳密なマッチング
+
+```{r exact}
+Exact <- Match(data$wagea, data$T, data[,3:4], exact = TRUE)
+Exact %>% summary()
+```
+Estimateが研修効果で、`r Exact$est %>% round(3)`万円と導出されました。p値が充分小さいので説明力は有りそうに見えます。
+
+```{r exactLoop1}
+Exact$MatchLoopC %>% as.data.frame() %>%
+  filter(V1==1) %>%
+  knitr::kable()
+```
+
+ID=1とマッチしているデータとしてID=6, 240, 275, 442, 444, 596, 624, 665が抽出されていることがわかります。
+
+ただ、この処理は厳密なマッチングをしているので、T=1のデータの中で、マッチしないものがあります。
+```{r exactLoop2}
+data$ID[data$T ==1] -> data1
+Exact$MatchLoopC[,1] %>% unique() -> uniqueEML
+length(data1); length(uniqueEML)
+```
+
+で、差の34件はマッチしていません。
+試して見ると、確かにID=11と対応するコントロールグループのデータは存在しません。
+```{r exacrLoopCaliper}
+setdiff(data1, uniqueEML)
+data[11,]
+data %>% filter(years==3 & wageb==20 & T ==0) %>%
+  knitr::kable()
+```
+
+#4.厳密ではないマッチング
+
+前章のような欠落を許容せず、T=0群の中から近しいデータを探すアプローチ：
+
+```{r eucmaha}
+NN.Euclid <- Match(data$wagea, data$T, data[,3:4], Weight = 1)
+NN.Mahalanobis <- Match(data$wagea, data$T, data[,3:4], Weight = 2)
+NN.Euclid %>% summary()
+NN.Mahalanobis %>% summary()
+```
+
+前章の研修効果と余り変わっていないことが見て取れます。
+どのモデルが一番良いかの指標が特に見当たらないのですが、大差ないなら1.04万円当たりが正解なのでしょう。
+
+ExactではID=11と対応するコントロールグループのデータは存在しなかったが、これらのモデルでは存在することを確認します。
+
+```{r eucmaha11}
+NN.Euclid$MatchLoopC %>%
+  as.data.frame() %>%
+  filter(V1==11)
+NN.Mahalanobis$MatchLoopC %>%
+  as.data.frame() %>%
+  filter(V1==11) %>%
+  knitr::kable()
+```
+
+#5.傾向スコア法
+
+この例では次元数が少ないのであまり適切ではないが、練習のため傾向スコア法をやってみます。
+
+```{r ipw1}
+model_glm <- glm(T ~ years + wageb, data, family=binomial)
+ps_glm <- model_glm$fitted.values
+ipw_glm <- Match(data$wagea, data$T, ps_glm)
+```
+
+共変量のyearsとwagebを用いてTを予測した変数psが傾向スコアとなります。
+ここではロジスティック回帰をしていますが、SVM、RandomForestなども使われます。
+
+```{r ipw2}
+model_svm <- svm(as.factor(T) ~ years + wageb, data, probability = TRUE)
+ps_svm <- predict(model_svm, newdata=data[, 3:4], probability=TRUE) %>%
+  attr("probabilities")
+ipw_svm <- Match(data$wagea, data$T, ps_svm[,1])
+```
+
+各モデルの結果を比較。
+```{r models, warning=FALSE}
+#以下関数はGitHubのコードより作成
+#https://github.com/cran/Matching/blob/master/R/Matching.R
+summary_mdl <- function(object, obj_name){
+  data.frame(
+    Estimate=object$est,
+    AI_SE=object$se,
+    "T-stat"=object$est/object$se,
+    p.val=(1-pnorm(abs(object$est/object$se)))*2
+  ) %>% set_rownames(obj_name)
+}
+rbind(
+  summary_mdl(Exact, "Exact"),
+  summary_mdl(NN.Euclid, "NN.Euc"),
+  summary_mdl(NN.Mahalanobis, "NN.Mah"),
+  summary_mdl(ipw_glm, "ipw_glm"),
+  summary_mdl(ipw_svm, "ipw_svm")
+) %>% round(3) %>% knitr::kable()
+```
+
+SVMの結果がぱっとしないのは
+http://tjo.hatenablog.com/entry/2016/11/24/190000
+にあるように、probability calibrationをする必要があるようです。
+
+共変量を俯瞰すると以下のようになります。
+
+```{r ipw_cor}
+data2 <- cbind(data, ps_glm, ps_svm=ps_svm[,1])
+data2[,-5] %>% pairs.panels(rug=F,ellipses=F,lm=T)
+```
+
+ID=1にマッチするデータ
+```{r ID1data}
+cbind(
+  data2[c(1,6,240,275,442,444,596,624,665,198),],
+  data.frame(class=c("base", rep("all", 8), "ipw_svm"))
+) %>%
+  knitr::kable()
+```
+
+
+ID=11にマッチするデータ
+```{r ID11data}
+cbind(
+  data2[c(11,790,233,268,617,742,58,145,356,645,721,768),],
+  data.frame(class=c("base", "NN.Euc", rep("NN.Mah", 4), rep("ipw_glm", 5), "ipw_svm"))
+) %>%
+  knitr::kable()
+```
+
+#6.やり残したこと
+
+- 傾向スコアはいい加減な確認で終わってしまったので、もっと深めたい。特にipwパッケージを使うとどうなるか？
+- 共変量の次元数が多いデータで一通りやってみる
+- cemやMatchItのようなパッケージを使うとどうなるか
+
